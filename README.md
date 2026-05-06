@@ -1,8 +1,8 @@
 ![openfhir-logo](logo.png)
 
-# openFHIR Firely Server Plugin
-
 [![License: PolyForm Noncommercial](https://img.shields.io/badge/License-PolyForm%20Noncommercial%201.0-blue)](LICENSE)
+
+# openFHIR Firely Server Plugin
 
 This project is a [Firely Server](https://fire.ly/products/firely-server/) plugin that transparently routes clinical data between FHIR clients and an openEHR Clinical Data Repository (CDR). It sits inside a standard Firely Server instance and acts as an integration layer — selectively intercepting requests that should be handled by the CDR while letting everything else pass through to Firely as normal.
 
