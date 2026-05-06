@@ -1,0 +1,34 @@
+# Build output
+bin/
+obj/
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+packages/
+plugins/
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+.vs/
+
+# Rider
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Secrets / config overrides
+appsettings.*.json
+!appsettings.json
+
+*.pfx
+*.p12
+CLAUDE.md
+
+.secret/

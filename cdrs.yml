@@ -1,0 +1,27 @@
+- id: local
+  name: EHRbase (local)
+  baseUrl: http://openfhir-firely-plugin-ehrbase:8080/ehrbase/rest
+  authMethod: basic
+  basicAuth:
+    username: ehrbase-user
+    password: SuperSecretPassword
+
+- id: remote-oauth2
+  name: Remote CDR (OAuth2)
+  baseUrl: https://cdr.example.com/rest
+  authMethod: oauth2
+  oauth2:
+    tokenUrl: https://auth.example.com/oauth/token
+    clientId: my-client-id
+    clientSecret: my-client-secret
+    authMethod: basic
+    extraParams:
+      audience: https://cdr.example.com/openehr/v1
+
+- id: remote-basic
+  name: Remote CDR (Basic Auth)
+  baseUrl: https://cdr2.example.com/rest
+  authMethod: basic
+  basicAuth:
+    username: my-username
+    password: my-password

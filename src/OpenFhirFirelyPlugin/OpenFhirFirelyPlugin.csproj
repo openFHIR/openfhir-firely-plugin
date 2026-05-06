@@ -1,0 +1,16 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <OutputPath>../../plugins</OutputPath>
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+    <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Hl7.Fhir.Specification.R4" Version="6.0.*" ExcludeAssets="runtime" />
+    <PackageReference Include="Vonk.Core" Version="6.5-*" ExcludeAssets="runtime" />
+    <PackageReference Include="Vonk.Fhir.R4" Version="6.5-*" ExcludeAssets="runtime" />
+    <PackageReference Include="YamlDotNet" Version="16.*" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,71 @@
+services:
+  openfhir-firely-plugin-firely:
+    image: firely/server:6.7.0
+    ports:
+      - "4080:4080"
+    volumes:
+      - ./.secret/firely-license.json:/app/firely-license.json
+      - ./appsettings.json:/app/appsettings.json:ro
+      - ./logsettings.json:/app/logsettings.json:ro
+      - ./cdrs.yml:/app/cdrs.yml:ro
+      - ./plugins:/app/plugins:ro
+    depends_on:
+      openfhir-firely-plugin-mongodb:
+        condition: service_healthy
+
+  openfhir-firely-plugin-mongodb:
+    image: mongo:7
+    command: ["mongod", "--logpath", "/dev/null"]
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_ROOT_USERNAME=admin
+      - MONGO_INITDB_ROOT_PASSWORD=admin
+    volumes:
+      - mongodb-data:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  openfhir-firely-plugin-ehrbase:
+    image: ehrbase/ehrbase
+    depends_on:
+      openfhir-firely-plugin-ehrbase-postgres:
+        condition: service_healthy
+    ports:
+      - 8082:8080
+    environment:
+      - SECURITY_AUTHTYPE=BASIC
+      - DB_URL=jdbc:postgresql://openfhir-firely-plugin-ehrbase-postgres:5432/ehrbase
+      - DB_USER=ehrbase_restricted
+      - DB_PASS=ehrbase_restricted
+      - DB_USER_ADMIN=ehrbase
+      - DB_PASS_ADMIN=ehrbase
+      - SERVER_NODENAME=local.ehrbase.org
+      - SPRING_PROFILES_ACTIVE=local
+
+  openfhir-firely-plugin-ehrbase-postgres:
+    container_name: openfhir-firely-plugin-ehrbase-postgres
+    image: ehrbase/ehrbase-v2-postgres:16.2
+    ports:
+      - 5439:5432
+    environment:
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=postgres
+      - EHRBASE_USER=ehrbase_restricted
+      - EHRBASE_PASSWORD=ehrbase_restricted
+      - EHRBASE_USER_ADMIN=ehrbase
+      - EHRBASE_PASSWORD_ADMIN=ehrbase
+    volumes:
+      - openfhir-firely-plugin-db-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  openfhir-firely-plugin-db-data:
+  mongodb-data:

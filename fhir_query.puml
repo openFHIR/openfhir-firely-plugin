@@ -1,0 +1,31 @@
+@startuml fhir_query
+
+actor "FHIR Consumer/Source" as consumer
+
+box "Firely Integration Layer"
+    participant "openFHIR Firely Plugin\n(this project)" as facade
+    participant "Firely FHIR DB" as firely
+end box
+
+participant "openFHIR" as openfhir
+participant "openEHR CDR" as cdr
+
+consumer -> facade : FHIR Search Query\n(e.g. GET /fhir/AllergyIntolerance?patient=123)\n[X-OpenEhrCdr: <cdr-id>]
+
+facade -> firely : PIX lookup — read Patient,\nfind EHR ID for target CDR
+
+facade -> openfhir : /toaql (templateId, ehrId, fhirPath)
+
+openfhir --> facade : AQL(s)
+
+facade -> cdr : execute AQL
+cdr --> facade : archetype rows
+
+facade -> openfhir : REST /tofhir (archetype rows)
+
+
+openfhir --> facade : FHIR Bundle
+
+facade --> consumer : FHIR searchset Bundle\n(filtered to requested resource type)
+
+@enduml

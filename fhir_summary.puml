@@ -1,0 +1,34 @@
+@startuml fhir_summary
+
+actor "FHIR Consumer/Source" as consumer
+
+box "Firely Integration Layer"
+    participant "openFHIR Firely Plugin\n(this project)" as facade
+    participant "Firely FHIR DB" as firely
+end box
+
+
+participant "openFHIR" as openfhir
+participant "openEHR CDR" as cdr
+
+consumer -> facade : GET /fhir/Patient/{id}/$summary
+
+facade -> firely : read Patient by id
+
+facade -> facade : resolve EHR ID via PIX manager
+
+loop for each configured FHIR path
+    facade -> openfhir : /toaql (templateId, ehrId, fhirPath)
+    openfhir --> facade : AQL(s)
+    facade -> cdr : execute AQL
+    cdr --> facade : archetype rows
+end
+
+facade -> openfhir : /tofhir (all archetype rows)
+openfhir --> facade : FHIR IPS Bundle
+
+facade -> facade : inject Patient resource\nfix subject references
+facade --> consumer : IPS Bundle (from openEHR CDR)
+
+
+@enduml

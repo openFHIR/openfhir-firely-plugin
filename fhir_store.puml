@@ -1,0 +1,29 @@
+@startuml fhir_store
+
+actor "FHIR Consumer/Source" as consumer
+
+box "Firely Integration Layer"
+    participant "openFHIR Firely Plugin\n(this project)" as facade
+    participant "Firely FHIR DB" as firely
+end box
+
+participant "openFHIR" as openfhir
+participant "openEHR CDR" as cdr
+
+consumer -> facade : Store FHIR Resource
+
+facade -> firely : PIX lookup — read Patient,\nfind EHR ID for target CDR
+
+alt EHR ID not found
+    facade -> cdr : POST /ehr (create new EHR)
+    cdr --> facade : ehrId
+    facade -> firely : update Patient with new ehrId identifier
+end
+
+facade -> openfhir : REST /toopenehr (FHIR resource)
+
+openfhir --> facade : openEHR Composition
+
+facade -> cdr : POST /ehr/{{ehrId}}/composition
+
+@enduml
