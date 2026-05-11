@@ -7,7 +7,6 @@ using OpenFhirFirelyPlugin.OpenEhr;
 using OpenFhirFirelyPlugin.OpenFhir;
 using OpenFhirFirelyPlugin.Pix;
 using Vonk.Core.Context;
-using Vonk.Fhir.R4;
 using FhirPatient = Hl7.Fhir.Model.Patient;
 using Task = System.Threading.Tasks.Task;
 
@@ -51,12 +50,11 @@ public class IpsSummaryService
 
         if (string.IsNullOrWhiteSpace(patientId))
         {
-            ctx.Response.HttpResult = 400;
-            ctx.Response.Outcome.AddIssue(BuildIssue(OperationOutcome.IssueSeverity.Error,
-                OperationOutcome.IssueType.Required, "Could not determine patient ID from request"));
+            await WriteOperationOutcome(400, OperationOutcome.IssueSeverity.Error,
+                OperationOutcome.IssueType.Required, "Could not determine patient ID from request");
             return;
         }
-
+        var (request, args, response) = ctx.Parts();
         var httpRequest = _httpContextAccessor.HttpContext?.Request;
         var incomingReqId = httpRequest?.Headers[XReqIdHeader].ToString() ?? string.Empty;
         var reqId = !string.IsNullOrWhiteSpace(incomingReqId) ? incomingReqId : Guid.NewGuid().ToString();
@@ -69,10 +67,9 @@ public class IpsSummaryService
         var ehrId = await _pixManager.ResolveById(patientId, Constants.EhrIdSystem, resolvedCdrName, ctx);
         if (ehrId == null)
         {
-            ctx.Response.HttpResult = 404;
-            ctx.Response.Outcome.AddIssue(BuildIssue(OperationOutcome.IssueSeverity.Error,
+            await WriteOperationOutcome(404, OperationOutcome.IssueSeverity.Error,
                 OperationOutcome.IssueType.NotFound,
-                $"No EHR ID found for patient {patientId} on CDR '{resolvedCdrName}'"));
+                $"No EHR ID found for patient {patientId} on CDR '{resolvedCdrName}'");
             return;
         }
 
@@ -112,17 +109,40 @@ public class IpsSummaryService
             _logger.LogInformation("Sending {Count} archetype rows to toFhir for patient {PatientId}",
                 allRows.Count, patientId);
             var fhirJson = await _openFhirClient.ToFhir(allRows, reqId, TemplateId);
-            bundle = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(fhirJson) as Bundle
-                     ?? throw new InvalidOperationException("toFhir did not return a Bundle");
+            _logger.LogInformation("toFhir raw response for patient {PatientId}: {FhirJson}", patientId, fhirJson);
+            var deserializedBundle = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(fhirJson) as Bundle;
 
             var patient = await LoadPatient(patientId, ctx);
-            InjectPatient(bundle, patient);
-            if (bundle.Entry.Count > 0)
-                bundle.Entry[0].FullUrl = "urn:uuid:" + Guid.NewGuid();
-        }
 
-        ctx.Response.HttpResult = 200;
-        ctx.Response.Payload = bundle.ToIResource();
+            if (deserializedBundle == null)
+            {
+                _logger.LogWarning("toFhir did not return a Bundle for patient {PatientId}, returning empty IPS bundle", patientId);
+                bundle = BuildEmptyBundle(patient);
+            }
+            else
+            {
+                bundle = deserializedBundle;
+                InjectPatient(bundle, patient);
+                if (bundle.Entry.Count > 0)
+                    bundle.Entry[0].FullUrl = "urn:uuid:" + Guid.NewGuid();
+            }
+        }
+        
+        _logger.LogInformation("$summary bundle for patient {PatientId} (entries={Count}): {BundleJson}",
+            patientId, bundle.Entry.Count, new FhirJsonSerializer().SerializeToString(bundle));
+
+        // Mark the request as handled to prevent normal storage
+        args.Handled();
+        await SendResponse(ctx, bundle);
+    }
+    
+    private async Task SendResponse(IVonkContext vonkContext, Bundle bundle)
+    {
+        vonkContext.Response.HttpResult = 200;
+        var httpResponse = _httpContextAccessor.HttpContext!.Response;
+        httpResponse.StatusCode = 200;
+        httpResponse.ContentType = "application/fhir+json;charset=UTF-8";
+        await httpResponse.WriteAsync(new FhirJsonSerializer().SerializeToString(bundle));
     }
 
     private Task<FhirPatient> LoadPatient(string patientId, IVonkContext ctx)
@@ -173,9 +193,12 @@ public class IpsSummaryService
         {
             Type = Bundle.BundleType.Document,
             Timestamp = DateTimeOffset.UtcNow,
-            Identifier = new Identifier("urn:oid:2.16.840.1.113883.3.72", Guid.NewGuid().ToString())
+            Identifier = new Identifier("urn:oid:2.16.840.1.113883.3.72", Guid.NewGuid().ToString()),
+            Meta = new Meta
+            {
+                ProfileUri = ["http://hl7.org/fhir/uv/ips/StructureDefinition/Bundle-uv-ips"]
+            }
         };
-        composition.Meta.ProfileUri = ["http://hl7.org/fhir/uv/ips/StructureDefinition/Bundle-uv-ips"];
 
         bundle.AddResourceEntry(composition, "urn:uuid:" + composition.Id);
         bundle.AddResourceEntry(patient, patientFullUrl);
@@ -233,11 +256,14 @@ public class IpsSummaryService
         }
     }
 
-    private static OperationOutcome.IssueComponent BuildIssue(
-        OperationOutcome.IssueSeverity severity,
-        OperationOutcome.IssueType code,
-        string diagnostics)
+    private async Task WriteOperationOutcome(int statusCode, OperationOutcome.IssueSeverity severity,
+        OperationOutcome.IssueType code, string diagnostics)
     {
-        return new OperationOutcome.IssueComponent { Severity = severity, Code = code, Diagnostics = diagnostics };
+        var outcome = new OperationOutcome();
+        outcome.Issue.Add(new OperationOutcome.IssueComponent { Severity = severity, Code = code, Diagnostics = diagnostics });
+        var httpResponse = _httpContextAccessor.HttpContext!.Response;
+        httpResponse.StatusCode = statusCode;
+        httpResponse.ContentType = "application/fhir+json;charset=UTF-8";
+        await httpResponse.WriteAsync(new FhirJsonSerializer().SerializeToString(outcome));
     }
 }
