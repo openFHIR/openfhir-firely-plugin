@@ -20,7 +20,8 @@ public class IpsSummaryService
     private static readonly List<string> FhirPaths = new()
     {
         "/AllergyIntolerance",
-        "/Condition?verification-status=confirmed"
+        "/Condition?verification-status=confirmed",
+        "/DeviceUseStatement?_include=DeviceUseStatement:device"
     };
 
     private readonly PixManager _pixManager;
