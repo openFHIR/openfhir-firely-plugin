@@ -3,6 +3,8 @@ using Hl7.Fhir.Model;
 using Hl7.Fhir.Serialization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
+using OpenFhirFirelyPlugin.Configuration;
 using OpenFhirFirelyPlugin.OpenEhr;
 using OpenFhirFirelyPlugin.OpenFhir;
 using OpenFhirFirelyPlugin.Pix;
@@ -14,14 +16,22 @@ namespace OpenFhirFirelyPlugin.Ips;
 
 public class IpsSummaryService
 {
-    private const string TemplateId = "International Patient Summary";
     private const string XReqIdHeader = "x-req-id";
+    private const string ResourceTypeKey = "_resourceType";
 
     private static readonly List<string> FhirPaths = new()
     {
         "/AllergyIntolerance",
         "/Condition?verification-status=confirmed",
-        "/DeviceUseStatement?_include=DeviceUseStatement:device"
+        "/MedicationStatement?_include=MedicationStatement:medication",
+        "/MedicationRequest?_include=MedicationRequest:medication",
+        "/Immunization",
+        "/Procedure",
+        "/DiagnosticReport?_include=DiagnosticReport:result",
+        "/Observation?category=laboratory",
+        "/Observation?category=vital-signs",
+        "/DeviceUseStatement?_include=DeviceUseStatement:device",
+        "/Specimen"
     };
 
     private readonly PixManager _pixManager;
@@ -29,12 +39,14 @@ public class IpsSummaryService
     private readonly OpenFhirClient _openFhirClient;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<IpsSummaryService> _logger;
+    private readonly List<QueryRule> _queryRules;
 
     public IpsSummaryService(
         PixManager pixManager,
         OpenEhrCdrRegistry cdrRegistry,
         OpenFhirClient openFhirClient,
         IHttpContextAccessor httpContextAccessor,
+        IOptions<InterceptorOptions> interceptorOptions,
         ILogger<IpsSummaryService> logger)
     {
         _pixManager = pixManager;
@@ -42,6 +54,7 @@ public class IpsSummaryService
         _openFhirClient = openFhirClient;
         _httpContextAccessor = httpContextAccessor;
         _logger = logger;
+        _queryRules = interceptorOptions.Value.FhirQueryFilter.Rules;
     }
 
     public async Task ExecuteSummary(IVonkContext ctx)
@@ -75,11 +88,19 @@ public class IpsSummaryService
         }
 
         var cdrClient = _cdrRegistry.Resolve(cdrHeader);
-        var allRows = new List<JsonElement>();
+        // rows grouped by templateId so each ToFhir call uses the correct template
+        var rowsByTemplate = new Dictionary<string, List<JsonElement>>();
 
         foreach (var fhirPath in FhirPaths)
         {
-            var toAqlRequest = new ToAqlRequest(TemplateId, ehrId, fhirPath);
+            var templateId = ResolveTemplateId(fhirPath);
+            if (templateId == null)
+            {
+                _logger.LogDebug("No matching rule for fhirPath={FhirPath}, skipping", fhirPath);
+                continue;
+            }
+
+            var toAqlRequest = new ToAqlRequest(templateId, ehrId, fhirPath);
             var toAqlResponse = await _openFhirClient.GetAql(toAqlRequest, reqId);
 
             if (toAqlResponse.Aqls.Count == 0)
@@ -88,18 +109,25 @@ public class IpsSummaryService
                 continue;
             }
 
+            if (!rowsByTemplate.TryGetValue(templateId, out var bucket))
+            {
+                bucket = new List<JsonElement>();
+                rowsByTemplate[templateId] = bucket;
+            }
+
             foreach (var aqlEntry in toAqlResponse.Aqls)
             {
                 if (aqlEntry.Type == AqlType.COMPOSITION) continue;
 
                 var openEhrResult = await cdrClient.QueryAql(aqlEntry.Aql);
-                allRows.AddRange(ExtractArchetypeRows(openEhrResult));
+                bucket.AddRange(ExtractArchetypeRows(openEhrResult));
             }
         }
 
+        var totalRows = rowsByTemplate.Values.Sum(b => b.Count);
         Bundle bundle;
 
-        if (allRows.Count == 0)
+        if (totalRows == 0)
         {
             _logger.LogInformation("No archetype rows found for patient {PatientId}, returning empty IPS bundle", patientId);
             var patient = await LoadPatient(patientId, ctx);
@@ -108,21 +136,34 @@ public class IpsSummaryService
         else
         {
             _logger.LogInformation("Sending {Count} archetype rows to toFhir for patient {PatientId}",
-                allRows.Count, patientId);
-            var fhirJson = await _openFhirClient.ToFhir(allRows, reqId, TemplateId);
-            _logger.LogInformation("toFhir raw response for patient {PatientId}: {FhirJson}", patientId, fhirJson);
-            var deserializedBundle = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(fhirJson) as Bundle;
+                totalRows, patientId);
+
+            // Call ToFhir once per template and collect all entries
+            var allEntries = new List<Bundle.EntryComponent>();
+            foreach (var (templateId, rows) in rowsByTemplate)
+            {
+                if (rows.Count == 0) continue;
+                var fhirJson = await _openFhirClient.ToFhir(rows, reqId, templateId);
+                _logger.LogInformation("toFhir raw response (templateId={TemplateId}) for patient {PatientId}: {FhirJson}",
+                    templateId, patientId, fhirJson);
+                var deserializedBundle = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(fhirJson) as Bundle;
+                if (deserializedBundle != null)
+                    allEntries.AddRange(deserializedBundle.Entry);
+                else
+                    _logger.LogWarning("toFhir did not return a Bundle for templateId={TemplateId}, patient {PatientId}", templateId, patientId);
+            }
 
             var patient = await LoadPatient(patientId, ctx);
 
-            if (deserializedBundle == null)
+            if (allEntries.Count == 0)
             {
-                _logger.LogWarning("toFhir did not return a Bundle for patient {PatientId}, returning empty IPS bundle", patientId);
+                _logger.LogWarning("No entries after toFhir calls for patient {PatientId}, returning empty IPS bundle", patientId);
                 bundle = BuildEmptyBundle(patient);
             }
             else
             {
-                bundle = deserializedBundle;
+                bundle = new Bundle { Type = Bundle.BundleType.Document, Timestamp = DateTimeOffset.UtcNow };
+                bundle.Entry.AddRange(allEntries);
                 InjectPatient(bundle, patient);
                 if (bundle.Entry.Count > 0)
                     bundle.Entry[0].FullUrl = "urn:uuid:" + Guid.NewGuid();
@@ -150,6 +191,21 @@ public class IpsSummaryService
     {
         // Return a minimal Patient — $summary should still work
         return System.Threading.Tasks.Task.FromResult(new FhirPatient { Id = patientId });
+    }
+
+    private string? ResolveTemplateId(string fhirPath)
+    {
+        // Extract resource type from the fhirPath (e.g. "/Condition?..." -> "Condition")
+        var pathPart = fhirPath.TrimStart('/');
+        var resourceType = pathPart.Contains('?') ? pathPart[..pathPart.IndexOf('?')] : pathPart;
+
+        foreach (var rule in _queryRules)
+        {
+            if (rule.FhirQuery.TryGetValue(ResourceTypeKey, out var ruleResourceType)
+                && (ruleResourceType == "*" || ruleResourceType == resourceType))
+                return rule.TemplateId;
+        }
+        return null;
     }
 
     private static IReadOnlyList<JsonElement> ExtractArchetypeRows(string aqlResultJson)
