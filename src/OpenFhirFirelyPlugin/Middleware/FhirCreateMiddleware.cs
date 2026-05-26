@@ -93,8 +93,6 @@ public class FhirCreateMiddleware
         ["VisionPrescription"]          = new() { "VisionPrescription.patient" },
     };
 
-    private static readonly FhirJsonSerializer FhirSerializer = new();
-
     public FhirCreateMiddleware(RequestDelegate next, ILogger<FhirCreateMiddleware> logger)
     {
         _next = next;
@@ -128,10 +126,12 @@ public class FhirCreateMiddleware
         var body = await ReadBodyAsync(httpContext.Request);
         httpContext.Request.Body.Position = 0;
 
+        var informationModel = FhirVersionHelper.ResolveInformationModel(httpContext.Request, httpContext.Vonk().InformationModel);
+
         Resource resource;
         try
         {
-            resource = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(body);
+            resource = FhirVersionHelper.GetDeserializer(informationModel).DeserializeResource(body);
         }
         catch (Exception ex)
         {
@@ -163,15 +163,21 @@ public class FhirCreateMiddleware
             var cdrClient = cdrRegistry.Resolve(cdrHeader);
             var resolvedCdrName = cdrEntry.Id;
 
-            var patientId = ExtractPatientReferenceIdPart(resource);
+            var fhirSerializer = FhirVersionHelper.GetSerializer(informationModel);
+            var patientId = ExtractPatientReferenceIdPart(resource, fhirSerializer);
             if (patientId == null)
                 throw new InvalidOperationException(
                     $"Could not extract patient reference from resource {resource.TypeName}/{resource.Id}");
 
-            var ehrId = await pixManager.ResolveById(patientId, Constants.EhrIdSystem, resolvedCdrName, vonkContext)
-                        ?? (await pixManager.ProvisionEhrForPatient(patientId, cdrClient, resolvedCdrName, vonkContext)).Value!;
+            var ehrId = await pixManager.ResolveById(patientId, Constants.EhrIdSystem, resolvedCdrName, vonkContext);
+            if (ehrId == null)
+            {
+                await pixManager.ProvisionEhrForPatient(patientId, cdrClient, resolvedCdrName, vonkContext);
+                ehrId = await pixManager.ResolveById(patientId, Constants.EhrIdSystem, resolvedCdrName, vonkContext)
+                    ?? throw new InvalidOperationException($"EHR ID still not found for patient {patientId} after provisioning");
+            }
 
-            var bundleJson = FhirSerializer.SerializeToString(ToBundle(resource));
+            var bundleJson = fhirSerializer.SerializeToString(ToBundle(resource));
             var openEhrPayload = await openFhirClient.Convert(bundleJson, reqId);
             var location = await cdrClient.Store(openEhrPayload, ehrId);
 
@@ -220,14 +226,14 @@ public class FhirCreateMiddleware
             .FirstOrDefault(p => p != null && interceptedProfiles.Contains(p));
     }
 
-    private string? ExtractPatientReferenceIdPart(Resource resource)
+    private string? ExtractPatientReferenceIdPart(Resource resource, BaseFhirJsonSerializer fhirSerializer)
     {
         if (resource is Bundle bundle)
         {
             return bundle.Entry
                 .Select(e => e.Resource)
                 .Where(r => r != null)
-                .Select(r => ExtractPatientReferenceIdPart(r!))
+                .Select(r => ExtractPatientReferenceIdPart(r!, fhirSerializer))
                 .FirstOrDefault(id => id != null);
         }
 
@@ -239,7 +245,7 @@ public class FhirCreateMiddleware
         }
 
         // Use JSON to resolve patient references without FhirTerser dependency
-        var json = FhirSerializer.SerializeToString(resource);
+        var json = fhirSerializer.SerializeToString(resource);
         using var doc = JsonDocument.Parse(json);
 
         foreach (var path in paths)

@@ -17,7 +17,6 @@ namespace OpenFhirFirelyPlugin.Ips;
 public class IpsSummaryService
 {
     private const string XReqIdHeader = "x-req-id";
-    private const string ResourceTypeKey = "_resourceType";
 
     private static readonly List<string> FhirPaths = new()
     {
@@ -31,7 +30,7 @@ public class IpsSummaryService
         "/Observation?category=laboratory",
         "/Observation?category=vital-signs",
         "/DeviceUseStatement?_include=DeviceUseStatement:device",
-        "/Specimen"
+        "/Specimen",
     };
 
     private readonly PixManager _pixManager;
@@ -39,7 +38,7 @@ public class IpsSummaryService
     private readonly OpenFhirClient _openFhirClient;
     private readonly IHttpContextAccessor _httpContextAccessor;
     private readonly ILogger<IpsSummaryService> _logger;
-    private readonly List<QueryRule> _queryRules;
+    private readonly string _ipsTemplateId;
 
     public IpsSummaryService(
         PixManager pixManager,
@@ -54,7 +53,7 @@ public class IpsSummaryService
         _openFhirClient = openFhirClient;
         _httpContextAccessor = httpContextAccessor;
         _logger = logger;
-        _queryRules = interceptorOptions.Value.FhirQueryFilter.Rules;
+        _ipsTemplateId = interceptorOptions.Value.Ips.TemplateId;
     }
 
     public async Task ExecuteSummary(IVonkContext ctx)
@@ -70,6 +69,7 @@ public class IpsSummaryService
         }
         var (request, args, response) = ctx.Parts();
         var httpRequest = _httpContextAccessor.HttpContext?.Request;
+        var informationModel = FhirVersionHelper.ResolveInformationModel(httpRequest!, ctx.InformationModel);
         var incomingReqId = httpRequest?.Headers[XReqIdHeader].ToString() ?? string.Empty;
         var reqId = !string.IsNullOrWhiteSpace(incomingReqId) ? incomingReqId : Guid.NewGuid().ToString();
 
@@ -88,46 +88,28 @@ public class IpsSummaryService
         }
 
         var cdrClient = _cdrRegistry.Resolve(cdrHeader);
-        // rows grouped by templateId so each ToFhir call uses the correct template
-        var rowsByTemplate = new Dictionary<string, List<JsonElement>>();
+        var allRows = new List<JsonElement>();
 
         foreach (var fhirPath in FhirPaths)
         {
-            var templateId = ResolveTemplateId(fhirPath);
-            if (templateId == null)
-            {
-                _logger.LogDebug("No matching rule for fhirPath={FhirPath}, skipping", fhirPath);
-                continue;
-            }
+            var toAqlResponse = await _openFhirClient.GetAql(new ToAqlRequest(_ipsTemplateId, ehrId, fhirPath), reqId);
 
-            var toAqlRequest = new ToAqlRequest(templateId, ehrId, fhirPath);
-            var toAqlResponse = await _openFhirClient.GetAql(toAqlRequest, reqId);
-
-            if (toAqlResponse.Aqls.Count == 0)
+            if (toAqlResponse.Aqls == null || toAqlResponse.Aqls.Count == 0)
             {
                 _logger.LogDebug("No AQLs returned for fhirPath={FhirPath}, skipping", fhirPath);
                 continue;
             }
 
-            if (!rowsByTemplate.TryGetValue(templateId, out var bucket))
+            foreach (var aqlEntry in SelectAqls(toAqlResponse.Aqls))
             {
-                bucket = new List<JsonElement>();
-                rowsByTemplate[templateId] = bucket;
-            }
-
-            foreach (var aqlEntry in toAqlResponse.Aqls)
-            {
-                if (aqlEntry.Type == AqlType.COMPOSITION) continue;
-
                 var openEhrResult = await cdrClient.QueryAql(aqlEntry.Aql);
-                bucket.AddRange(ExtractArchetypeRows(openEhrResult));
+                allRows.AddRange(ExtractArchetypeRows(openEhrResult));
             }
         }
 
-        var totalRows = rowsByTemplate.Values.Sum(b => b.Count);
         Bundle bundle;
 
-        if (totalRows == 0)
+        if (allRows.Count == 0)
         {
             _logger.LogInformation("No archetype rows found for patient {PatientId}, returning empty IPS bundle", patientId);
             var patient = await LoadPatient(patientId, ctx);
@@ -136,55 +118,61 @@ public class IpsSummaryService
         else
         {
             _logger.LogInformation("Sending {Count} archetype rows to toFhir for patient {PatientId}",
-                totalRows, patientId);
+                allRows.Count, patientId);
 
-            // Call ToFhir once per template and collect all entries
-            var allEntries = new List<Bundle.EntryComponent>();
-            foreach (var (templateId, rows) in rowsByTemplate)
-            {
-                if (rows.Count == 0) continue;
-                var fhirJson = await _openFhirClient.ToFhir(rows, reqId, templateId);
-                _logger.LogInformation("toFhir raw response (templateId={TemplateId}) for patient {PatientId}: {FhirJson}",
-                    templateId, patientId, fhirJson);
-                var deserializedBundle = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(fhirJson) as Bundle;
-                if (deserializedBundle != null)
-                    allEntries.AddRange(deserializedBundle.Entry);
-                else
-                    _logger.LogWarning("toFhir did not return a Bundle for templateId={TemplateId}, patient {PatientId}", templateId, patientId);
-            }
+            var fhirJson = await _openFhirClient.ToFhir(allRows, reqId, _ipsTemplateId);
+            _logger.LogInformation("toFhir raw response for patient {PatientId}: {FhirJson}", patientId, fhirJson);
 
+            var resultBundle = FhirVersionHelper.GetDeserializer(FhirVersionHelper.FhirR4).DeserializeResource(fhirJson) as Bundle;
             var patient = await LoadPatient(patientId, ctx);
 
-            if (allEntries.Count == 0)
+            if (resultBundle == null || resultBundle.Entry.Count == 0)
             {
-                _logger.LogWarning("No entries after toFhir calls for patient {PatientId}, returning empty IPS bundle", patientId);
+                _logger.LogWarning("toFhir did not return a Bundle with entries for patient {PatientId}, returning empty IPS bundle", patientId);
                 bundle = BuildEmptyBundle(patient);
             }
             else
             {
                 bundle = new Bundle { Type = Bundle.BundleType.Document, Timestamp = DateTimeOffset.UtcNow };
-                bundle.Entry.AddRange(allEntries);
+                bundle.Entry.AddRange(resultBundle.Entry);
                 InjectPatient(bundle, patient);
                 if (bundle.Entry.Count > 0)
                     bundle.Entry[0].FullUrl = "urn:uuid:" + Guid.NewGuid();
             }
         }
         
+        // POCOs are always R4; transcode to the requested version if needed
+        var outputBundle = TranscodeBundle(bundle, informationModel);
+
         _logger.LogInformation("$summary bundle for patient {PatientId} (entries={Count}): {BundleJson}",
-            patientId, bundle.Entry.Count, new FhirJsonSerializer().SerializeToString(bundle));
+            patientId, outputBundle.Entry.Count, FhirVersionHelper.GetSerializer(informationModel).SerializeToString(outputBundle));
 
         // Mark the request as handled to prevent normal storage
         args.Handled();
-        await SendResponse(ctx, bundle);
+        await SendResponse(ctx, outputBundle, informationModel);
     }
     
-    private async Task SendResponse(IVonkContext vonkContext, Bundle bundle)
+    /// <summary>
+    /// POCOs built in this service are always R4. If the requested version differs,
+    /// serialize with R4 and re-deserialize with the target version's deserializer.
+    /// </summary>
+    private static Bundle TranscodeBundle(Bundle r4Bundle, string informationModel)
+    {
+        if (informationModel == FhirVersionHelper.FhirR4)
+            return r4Bundle;
+
+        var json = FhirVersionHelper.GetSerializer(FhirVersionHelper.FhirR4).SerializeToString(r4Bundle);
+        return FhirVersionHelper.GetDeserializer(informationModel).DeserializeResource(json) as Bundle
+               ?? throw new InvalidOperationException("Transcode produced a non-Bundle resource");
+    }
+
+    private async Task SendResponse(IVonkContext vonkContext, Bundle bundle, string informationModel)
     {
         vonkContext.Response.HttpResult = 200;
         var httpResponse = _httpContextAccessor.HttpContext!.Response;
         httpResponse.StatusCode = 200;
         httpResponse.ContentType = "application/fhir+json;charset=UTF-8";
-        await httpResponse.WriteAsync(new FhirJsonSerializer().SerializeToString(bundle));
+        await httpResponse.WriteAsync(FhirVersionHelper.GetSerializer(informationModel).SerializeToString(bundle));
     }
 
     private Task<FhirPatient> LoadPatient(string patientId, IVonkContext ctx)
@@ -193,19 +181,10 @@ public class IpsSummaryService
         return System.Threading.Tasks.Task.FromResult(new FhirPatient { Id = patientId });
     }
 
-    private string? ResolveTemplateId(string fhirPath)
+    private static IEnumerable<AqlEntry> SelectAqls(List<AqlEntry> aqls)
     {
-        // Extract resource type from the fhirPath (e.g. "/Condition?..." -> "Condition")
-        var pathPart = fhirPath.TrimStart('/');
-        var resourceType = pathPart.Contains('?') ? pathPart[..pathPart.IndexOf('?')] : pathPart;
-
-        foreach (var rule in _queryRules)
-        {
-            if (rule.FhirQuery.TryGetValue(ResourceTypeKey, out var ruleResourceType)
-                && (ruleResourceType == "*" || ruleResourceType == resourceType))
-                return rule.TemplateId;
-        }
-        return null;
+        var entries = aqls.Where(a => a.Type != AqlType.COMPOSITION).ToList();
+        return entries.Count > 0 ? entries : aqls;
     }
 
     private static IReadOnlyList<JsonElement> ExtractArchetypeRows(string aqlResultJson)
@@ -295,21 +274,9 @@ public class IpsSummaryService
         else
             bundle.Entry.Add(patientEntry);
 
-        // Update subject references
         foreach (var entry in bundle.Entry)
         {
-            switch (entry.Resource)
-            {
-                case Composition comp:
-                    comp.Subject = new ResourceReference(patientFullUrl);
-                    break;
-                case Condition cond:
-                    cond.Subject = new ResourceReference(patientFullUrl);
-                    break;
-                case AllergyIntolerance ai:
-                    ai.Patient = new ResourceReference(patientFullUrl);
-                    break;
-            }
+            PatientReferenceHelper.SetPrimaryPatientReference(entry.Resource, patientFullUrl);
         }
     }
 
@@ -321,6 +288,6 @@ public class IpsSummaryService
         var httpResponse = _httpContextAccessor.HttpContext!.Response;
         httpResponse.StatusCode = statusCode;
         httpResponse.ContentType = "application/fhir+json;charset=UTF-8";
-        await httpResponse.WriteAsync(new FhirJsonSerializer().SerializeToString(outcome));
+        await httpResponse.WriteAsync(FhirVersionHelper.GetSerializer(null).SerializeToString(outcome));
     }
 }

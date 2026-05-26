@@ -8,9 +8,31 @@
     <CopyLocalLockFileAssemblies>true</CopyLocalLockFileAssemblies>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Hl7.Fhir.Specification.R4" Version="6.0.*" ExcludeAssets="runtime" />
-    <PackageReference Include="Vonk.Core" Version="6.5-*" ExcludeAssets="runtime" />
-    <PackageReference Include="Vonk.Fhir.R4" Version="6.5-*" ExcludeAssets="runtime" />
-    <PackageReference Include="YamlDotNet" Version="16.*" />
+    <PackageReference Include="Hl7.Fhir.Specification.R4"   Version="6.0.*" ExcludeAssets="runtime" />
+    <PackageReference Include="Hl7.Fhir.Specification.Stu3" Version="6.0.*" ExcludeAssets="runtime" />
+    <PackageReference Include="Hl7.Fhir.Specification.R5"   Version="6.0.*" ExcludeAssets="runtime" />
+    <PackageReference Include="Vonk.Core"                    Version="6.5-*" ExcludeAssets="runtime" />
+    <PackageReference Include="Vonk.Fhir.R3"                Version="6.5-*" ExcludeAssets="runtime" />
+    <PackageReference Include="Vonk.Fhir.R4"                Version="6.5-*" ExcludeAssets="runtime" />
+    <PackageReference Include="Vonk.Fhir.R5"                Version="6.5-*" ExcludeAssets="runtime" />
+    <PackageReference Include="YamlDotNet"                   Version="16.*" />
   </ItemGroup>
+  <!-- Alias conflicting FHIR version assemblies so FhirVersionHelper.cs can reference them
+       without CS0433 type ambiguity. Hl7.Fhir.R4 remains the default (global) alias. -->
+  <Target Name="AliasVersionedFhirAssemblies" BeforeTargets="ResolveReferences">
+    <ItemGroup>
+      <ReferencePath Condition="'%(FileName)' == 'Hl7.Fhir.R5'">
+        <Aliases>FhirR5Asm</Aliases>
+      </ReferencePath>
+      <ReferencePath Condition="'%(FileName)' == 'Hl7.Fhir.STU3'">
+        <Aliases>FhirStu3Asm</Aliases>
+      </ReferencePath>
+      <ReferencePath Condition="'%(FileName)' == 'Vonk.Fhir.R3'">
+        <Aliases>VonkR3</Aliases>
+      </ReferencePath>
+      <ReferencePath Condition="'%(FileName)' == 'Vonk.Fhir.R5'">
+        <Aliases>VonkR5</Aliases>
+      </ReferencePath>
+    </ItemGroup>
+  </Target>
 </Project>

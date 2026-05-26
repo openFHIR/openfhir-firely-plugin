@@ -45,7 +45,6 @@ public static class OpenFhirPluginConfiguration
         services.TryAddScoped<OpenEhrCdrRegistry>();
         services.TryAddScoped<OpenFhirClient>();
         services.TryAddScoped<PixManager>();
-        services.TryAddScoped<PatientCreatedHandler>();
         services.TryAddScoped<IpsSummaryService>();
         services.AddHttpContextAccessor();
 
@@ -58,13 +57,9 @@ public static class OpenFhirPluginConfiguration
             .CreateLogger("OpenFhirFirelyPlugin.Plugin.OpenFhirPluginConfiguration");
         logger.LogInformation("OpenFHIR plugin: registering middleware and Vonk pipeline handlers");
 
+        app.UseMiddleware<PatientCreatedHandler>();
         app.UseMiddleware<FhirCreateMiddleware>();
         app.UseMiddleware<FhirQueryMiddleware>();
-
-        // Vonk pipeline: post-Patient-create EHR provisioning
-        app.OnInteraction(VonkInteraction.type_create)
-           .AndResourceTypes("Patient")
-           .PostHandleAsyncWith<PatientCreatedHandler>((svc, ctx) => svc.OnPatientCreated(ctx));
 
         // Vonk pipeline: $summary custom operation on Patient instance
         app.OnCustomInteraction(VonkInteraction.instance_custom, "summary")

@@ -1,0 +1,5 @@
+# License files contain secrets — supply these locally
+licenses/
+
+# Firely runtime import dir — populated at runtime
+vonk-imported/

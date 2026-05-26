@@ -24,8 +24,6 @@ public class FhirQueryMiddleware
     private readonly RequestDelegate _next;
     private readonly ILogger<FhirQueryMiddleware> _logger;
 
-    private static readonly FhirJsonSerializer FhirSerializer = new();
-
     public FhirQueryMiddleware(RequestDelegate next, ILogger<FhirQueryMiddleware> logger)
     {
         _next = next;
@@ -67,12 +65,13 @@ public class FhirQueryMiddleware
             ? patientParam.Substring(patientParam.LastIndexOf('/') + 1)
             : patientParam;
 
-        _logger.LogInformation("GET {Path} — rule matched (templateId='{TemplateId}'), intercepting for patient={PatientId}",
-            httpContext.Request.Path, matchedRule.TemplateId, patientId);
+        _logger.LogInformation("GET {Path} — rule matched, intercepting for patient={PatientId}",
+            httpContext.Request.Path, patientId);
 
         try
         {
             var vonkContext = httpContext.Vonk();
+            var informationModel = FhirVersionHelper.ResolveInformationModel(httpContext.Request, vonkContext.InformationModel);
             var (request, args, response) = vonkContext.Parts();
             var incomingReqId = httpContext.Request.Headers[XReqIdHeader].ToString();
             var reqId = !string.IsNullOrWhiteSpace(incomingReqId) ? incomingReqId : Guid.NewGuid().ToString();
@@ -87,33 +86,37 @@ public class FhirQueryMiddleware
             var fhirPath = BuildFhirPath(httpContext.Request, resourceType);
 
             var toAqlResponse = await openFhirClient.GetAql(
-                new ToAqlRequest(matchedRule.TemplateId, ehrId, fhirPath), reqId);
+                new ToAqlRequest(null, ehrId, fhirPath), reqId);
 
-            if (toAqlResponse.Aqls.Count == 0)
+            if (toAqlResponse.Aqls == null || toAqlResponse.Aqls.Count == 0)
             {
-                await WriteBundle(httpContext, EmptySearchBundle());
+                await WriteBundle(httpContext, EmptySearchBundle(), FhirVersionHelper.GetSerializer(informationModel));
                 return;
             }
 
             var cdrClient = cdrRegistry.Resolve(cdrHeader);
             var allRows = new List<JsonElement>();
+            string? lastTemplateId = null;
 
-            foreach (var aqlEntry in toAqlResponse.Aqls)
+            foreach (var aqlEntry in SelectAqls(toAqlResponse.Aqls))
             {
-                if (aqlEntry.Type == AqlType.COMPOSITION) continue;
-
+                _logger.LogInformation("Executing AQL entry: {AqlEntry}", JsonSerializer.Serialize(aqlEntry));
                 var openEhrResult = await cdrClient.QueryAql(aqlEntry.Aql);
                 allRows.AddRange(ExtractArchetypeRows(openEhrResult));
+                if (!string.IsNullOrWhiteSpace(aqlEntry.TemplateId))
+                    lastTemplateId = aqlEntry.TemplateId;
             }
+
+            var fhirVersionSerializer = FhirVersionHelper.GetSerializer(informationModel);
 
             if (allRows.Count == 0)
             {
-                await WriteBundle(httpContext, EmptySearchBundle());
+                await WriteBundle(httpContext, EmptySearchBundle(), fhirVersionSerializer);
                 return;
             }
 
-            var fhirJson = await openFhirClient.ToFhir(allRows, reqId, matchedRule.TemplateId);
-            var resultBundle = FhirJsonDeserializer.SYNTAXONLY.DeserializeResource(fhirJson) as Bundle
+            var fhirJson = await openFhirClient.ToFhir(allRows, reqId, lastTemplateId);
+            var resultBundle = FhirVersionHelper.GetDeserializer(informationModel).DeserializeResource(fhirJson) as Bundle
                                ?? throw new InvalidOperationException("toFhir did not return a Bundle");
 
             var searchBundle = EmptySearchBundle();
@@ -124,12 +127,16 @@ public class FhirQueryMiddleware
                 if (string.IsNullOrEmpty(r.Id)) r.Id = Guid.NewGuid().ToString();
                 searchBundle.AddResourceEntry(r, $"{r.TypeName}/{r.Id}");
             }
+
+            var patientRef = $"Patient/{patientId}";
+            foreach (var entry in searchBundle.Entry)
+                PatientReferenceHelper.SetPrimaryPatientReference(entry.Resource, patientRef);
             searchBundle.Total = searchBundle.Entry.Count;
-            
+
             // Mark the request as handled to prevent normal storage
             args.Handled();
 
-            await WriteBundle(httpContext, searchBundle);
+            await WriteBundle(httpContext, searchBundle, fhirVersionSerializer);
         }
         catch (Exception ex)
         {
@@ -197,6 +204,12 @@ public class FhirQueryMiddleware
         return sb.ToString();
     }
 
+    private static IEnumerable<AqlEntry> SelectAqls(List<AqlEntry> aqls)
+    {
+        var entries = aqls.Where(a => a.Type != AqlType.COMPOSITION).ToList();
+        return entries.Count > 0 ? entries : aqls;
+    }
+
     private static IReadOnlyList<JsonElement> ExtractArchetypeRows(string aqlResultJson)
     {
         using var doc = JsonDocument.Parse(aqlResultJson);
@@ -220,11 +233,11 @@ public class FhirQueryMiddleware
         Total = 0
     };
 
-    private static async Task WriteBundle(HttpContext httpContext, Bundle bundle)
+    private static async Task WriteBundle(HttpContext httpContext, Bundle bundle, BaseFhirJsonSerializer fhirSerializer)
     {
         httpContext.Response.StatusCode = 200;
         httpContext.Response.ContentType = "application/fhir+json;charset=UTF-8";
-        await httpContext.Response.WriteAsync(FhirSerializer.SerializeToString(bundle));
+        await httpContext.Response.WriteAsync(fhirSerializer.SerializeToString(bundle));
     }
 
     private static string BuildOperationOutcomeJson(string message)

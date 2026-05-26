@@ -5,7 +5,7 @@ namespace OpenFhirFirelyPlugin.OpenFhir;
 public class ToAqlResponse
 {
     [JsonPropertyName("aqls")]
-    public List<AqlEntry> Aqls { get; set; } = new();
+    public List<AqlEntry>? Aqls { get; set; }
 }
 
 public class AqlEntry
@@ -15,6 +15,9 @@ public class AqlEntry
 
     [JsonPropertyName("type")]
     public AqlType Type { get; set; }
+
+    [JsonPropertyName("templateId")]
+    public string? TemplateId { get; set; }
 }
 
 [JsonConverter(typeof(JsonStringEnumConverter))]
