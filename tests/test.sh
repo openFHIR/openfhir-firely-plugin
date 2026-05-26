@@ -71,7 +71,7 @@ wait_for_log() {
 cleanup() {
     log "Tearing down containers..."
     cd "$SCRIPT_DIR"
-#    docker compose down 2>/dev/null || true
+    docker compose down 2>/dev/null || true
 }
 
 # ── Preflight checks ──────────────────────────────────────────────────────────
@@ -98,7 +98,7 @@ ok "Plugin built → $REPO_ROOT/plugins/"
 cd "$SCRIPT_DIR"
 
 # Ensure any previous run is cleaned up
-#docker compose down -v --remove-orphans 2>/dev/null || true
+docker compose down --remove-orphans 2>/dev/null || true
 
 log "Starting containers..."
 docker compose up -d
