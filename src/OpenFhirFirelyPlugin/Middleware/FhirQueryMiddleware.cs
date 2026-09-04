@@ -115,7 +115,7 @@ public class FhirQueryMiddleware
                 return;
             }
 
-            var fhirJson = await openFhirClient.ToFhir(allRows, reqId, lastTemplateId);
+            var fhirJson = await openFhirClient.ToFhir(allRows, reqId, lastTemplateId, ehrId, $"Patient/{patientId}");
             var resultBundle = FhirVersionHelper.GetDeserializer(informationModel).DeserializeResource(fhirJson) as Bundle
                                ?? throw new InvalidOperationException("toFhir did not return a Bundle");
 

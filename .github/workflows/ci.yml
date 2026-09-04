@@ -1,0 +1,29 @@
+# Build and unit-test on every push and pull request.
+# E2E tests (tests/test.sh) need Docker and the openfhir-enterprise image, so they stay local.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore OpenFhirFirelyPlugin.sln
+
+      - name: Build
+        run: dotnet build OpenFhirFirelyPlugin.sln --configuration Release --no-restore --warnaserror
+
+      - name: Unit tests
+        run: dotnet test OpenFhirFirelyPlugin.sln --configuration Release --no-build --verbosity normal

@@ -1,6 +1,7 @@
 # Build output
 bin/
 obj/
+out/
 
 # NuGet
 *.nupkg
@@ -32,3 +33,4 @@ appsettings.*.json
 CLAUDE.md
 
 .secret/
+/nimbalyst-local
