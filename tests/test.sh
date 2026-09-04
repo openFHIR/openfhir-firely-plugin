@@ -2,12 +2,17 @@
 set -e
 
 # ── Colours ──────────────────────────────────────────────────────────────────
-RESET=$(tput sgr0)
-BOLD=$(tput bold)
-GREEN=$(tput setaf 2)
-CYAN=$(tput setaf 6)
-YELLOW=$(tput setaf 3)
-RED=$(tput setaf 1)
+# tput fails on non-TTY/dumb terminals (e.g. CI runners) and would trip set -e.
+if [ -t 1 ] && command -v tput >/dev/null && [ "${TERM:-dumb}" != "dumb" ]; then
+    RESET=$(tput sgr0)
+    BOLD=$(tput bold)
+    GREEN=$(tput setaf 2)
+    CYAN=$(tput setaf 6)
+    YELLOW=$(tput setaf 3)
+    RED=$(tput setaf 1)
+else
+    RESET=""; BOLD=""; GREEN=""; CYAN=""; YELLOW=""; RED=""
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -69,8 +74,21 @@ wait_for_log() {
 }
 
 cleanup() {
-    log "Tearing down containers..."
+    local status=$?
     cd "$SCRIPT_DIR"
+    # On CI, capture container logs before teardown removes them: full logs
+    # to docker-logs.txt (uploaded as a workflow artifact), a bounded tail
+    # per service to the workflow log.
+    if [ "$status" -ne 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        warn "Run failed (exit $status) — dumping container logs before teardown"
+        docker compose logs --no-color > "$SCRIPT_DIR/docker-logs.txt" 2>&1 || true
+        for svc in firely openfhir mongodb ehrbase ehrbase-postgres; do
+            echo "::group::docker compose logs: $svc (last 400 lines)"
+            docker compose logs --no-color --tail=400 "$svc" 2>&1 || true
+            echo "::endgroup::"
+        done
+    fi
+    log "Tearing down containers..."
     docker compose down 2>/dev/null || true
 }
 
@@ -119,7 +137,8 @@ wait_for_http "http://localhost:4080/metadata" \
 # ── Step 4: Run Newman ────────────────────────────────────────────────────────
 log "Running Postman collection with Newman..."
 newman run "$COLLECTION" \
-    --reporters cli \
+    --reporters cli,junit \
+    --reporter-junit-export "$SCRIPT_DIR/newman-report.xml" \
     --bail
 
 ok "All Newman tests passed!"

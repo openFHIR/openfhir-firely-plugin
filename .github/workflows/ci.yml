@@ -1,5 +1,6 @@
-# Build and unit-test on every push and pull request.
-# E2E tests (tests/test.sh) need Docker and the openfhir-enterprise image, so they stay local.
+# Build and unit-test on every push and pull request — fast feedback.
+# The full E2E suite (tests/test.sh) runs in e2e.yml on every PR and as a
+# gate in release.yml.
 name: CI
 
 on:

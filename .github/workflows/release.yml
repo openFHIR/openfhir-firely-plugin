@@ -5,7 +5,8 @@
 #   2. Add a matching "## [x.y.z] - YYYY-MM-DD" section to CHANGELOG.md
 #   3. Merge to main, then run this workflow from the Actions tab (workflow_dispatch)
 #
-# The workflow builds and tests the plugin, packages the publish output as a zip,
+# The workflow first runs the full E2E suite (e2e.yml, tests/test.sh) as a
+# gate, then builds and tests the plugin, packages the publish output as a zip,
 # creates the git tag (plain "x.y.z", matching the existing tag convention) and a
 # GitHub release whose notes combine the CHANGELOG section with the Firely Server
 # compatibility derived from the Vonk SDK version referenced in the csproj.
@@ -21,7 +22,14 @@ env:
   PROJECT: src/OpenFhirFirelyPlugin/OpenFhirFirelyPlugin.csproj
 
 jobs:
+  # Full E2E suite (tests/test.sh via e2e.yml) must pass before the release
+  # tag — the irreversible step — is created.
+  e2e:
+    uses: ./.github/workflows/e2e.yml
+    secrets: inherit
+
   release:
+    needs: e2e
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
