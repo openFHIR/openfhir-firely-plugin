@@ -88,13 +88,28 @@ jobs:
 
       # Firely's first boot imports the FHIR spec zips into tests/vonk-imported
       # (~20-30 min). Caching that directory per image tag makes warm runs
-      # start in a couple of minutes.
-      - name: Cache Firely spec import
+      # start in a couple of minutes. Restore/save are split so a failed run
+      # never saves a partially imported directory under the immutable key
+      # (the combined actions/cache saves even when the job fails). The -v2
+      # suffix evicts a partial cache saved by an early failed run.
+      - name: Restore Firely spec import cache
         if: steps.secrets-check.outputs.available == 'true'
-        uses: actions/cache@v4
+        id: vonk-cache
+        uses: actions/cache/restore@v4
         with:
           path: tests/vonk-imported
-          key: vonk-imported-firely-${{ steps.firely.outputs.tag }}
+          key: vonk-imported-firely-${{ steps.firely.outputs.tag }}-v2
+
+      # The Firely container runs as a non-root 'firely' user and must be able
+      # to write into the bind-mounted vonk-imported dir. Without this, Docker
+      # creates the missing dir as root:755 (and a cache hit restores it owned
+      # by 'runner'), Firely crashes on .vonk-import-history.json, and the
+      # readiness gate polls a dead container until it times out.
+      - name: Make vonk-imported writable by the Firely container
+        if: steps.secrets-check.outputs.available == 'true'
+        run: |
+          mkdir -p tests/vonk-imported
+          sudo chmod -R a+rwX tests/vonk-imported
 
       # Explicit pull so a re-pushed tag can never leave us on a stale image.
       - name: Pull compose images
@@ -112,6 +127,13 @@ jobs:
       - name: Fix vonk-imported ownership for cache save
         if: always() && steps.secrets-check.outputs.available == 'true'
         run: sudo chown -R "$USER":"$USER" tests/vonk-imported 2>/dev/null || true
+
+      - name: Save Firely spec import cache
+        if: success() && steps.secrets-check.outputs.available == 'true' && steps.vonk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tests/vonk-imported
+          key: vonk-imported-firely-${{ steps.firely.outputs.tag }}-v2
 
       - name: Upload test report and logs
         if: always() && steps.secrets-check.outputs.available == 'true'

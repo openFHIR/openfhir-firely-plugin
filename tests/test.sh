@@ -28,9 +28,14 @@ wait_for_http() {
     local url=$1
     local label=${2:-"$url"}
     local timeout=${3:-120}
+    local container=${4:-}
     log "Waiting for $label to be ready..."
     local elapsed=0
     until curl -sf "$url" > /dev/null 2>&1; do
+        # Don't poll a dead container for the rest of the timeout.
+        if [ -n "$container" ] && [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
+            fail "Container '$container' exited while waiting for $label — check its logs"
+        fi
         sleep 2
         elapsed=$((elapsed + 2))
         if [ $elapsed -ge $timeout ]; then
@@ -128,11 +133,11 @@ trap cleanup EXIT
 wait_for_log  "mongodb-test"       "Waiting for connections"          60
 wait_for_log  "ehrbase-postgres-test" "database system is ready"      60
 wait_for_http "http://localhost:8081/ehrbase/rest/openehr/v1/definition/template/adl1.4" \
-              "EHRbase"            180
+              "EHRbase"            180  ehrbase-test
 wait_for_http "http://localhost:8080/health" \
-              "openFHIR"          180
+              "openFHIR"          180  openfhir-test
 wait_for_http "http://localhost:4080/metadata" \
-              "Firely" 1800
+              "Firely" 1800 firely-test
 
 # ── Step 4: Run Newman ────────────────────────────────────────────────────────
 log "Running Postman collection with Newman..."
