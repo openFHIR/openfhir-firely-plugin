@@ -18,14 +18,16 @@ facade -> firely : read Patient by id
 facade -> facade : resolve EHR ID via PIX manager
 
 loop for each configured FHIR path
-    facade -> openfhir : /toaql (templateId, ehrId, fhirPath)
+    facade -> openfhir : /openfhir/toaql (templateId, ehrId, fhirPath)
     openfhir --> facade : AQL(s)
     facade -> cdr : execute AQL
     cdr --> facade : archetype rows
 end
 
-facade -> openfhir : /tofhir (all archetype rows)
-openfhir --> facade : FHIR IPS Bundle
+facade -> openfhir : POST /$tofhir\n(Parameters: composition = all archetype rows,\ntemplateId, context: ehr_id + patient)
+openfhir --> facade : FHIR IPS Bundle\n(+ engine Provenance,\nOperationOutcome on partial failure)
+
+facade -> facade : strip engine Provenance\nand OperationOutcome entries
 
 facade -> facade : inject Patient resource\nfix subject references
 facade --> consumer : IPS Bundle (from openEHR CDR)

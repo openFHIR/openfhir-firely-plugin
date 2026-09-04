@@ -16,7 +16,9 @@ services:
         condition: service_healthy
 
   openfhir:
-    image: openfhir/openfhir-enterprise:build
+    # Pinned for reproducible runs; override locally with e.g.
+    #   OPENFHIR_IMAGE_TAG=build ./tests/test.sh
+    image: openfhir/openfhir-enterprise:${OPENFHIR_IMAGE_TAG:-3.0.0}
     container_name: openfhir-test
     ports:
       - "8080:8080"

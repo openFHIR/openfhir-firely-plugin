@@ -1,0 +1,158 @@
+# End-to-end tests: tests/test.sh brings up the full docker compose stack
+# (Firely Server, openFHIR enterprise, EHRbase, MongoDB, Postgres) and runs
+# the Postman collection with newman.
+#
+# Runs on every pull request, and is reused by release.yml (workflow_call)
+# as a gate before a release tag is created.
+#
+# Requires two repository secrets holding the raw license JSON contents:
+#   FIRELY_LICENSE_JSON   -> written to tests/licenses/firely-license.json
+#   OPENFHIR_LICENSE_JSON -> written to tests/licenses/openfhir-license.json
+#
+# Fork PRs cannot read these secrets, so for pull_request events the job
+# skips gracefully with a notice instead of failing red. On the release
+# path a missing secret is a hard failure — nothing ships untested.
+name: E2E
+
+on:
+  pull_request:
+  workflow_call:
+
+# Force-pushes to a PR shouldn't stack hour-long runs.
+concurrency:
+  group: e2e-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # Covers a cold Firely spec import (up to ~30 min) plus the test run.
+    timeout-minutes: 90
+    env:
+      # Keep the openFHIR pin visible here; tests/docker-compose.yml
+      # defaults to the same tag.
+      OPENFHIR_IMAGE_TAG: '3.0.0'
+    steps:
+      - name: Check license secrets
+        id: secrets-check
+        env:
+          FIRELY_LICENSE_JSON: ${{ secrets.FIRELY_LICENSE_JSON }}
+          OPENFHIR_LICENSE_JSON: ${{ secrets.OPENFHIR_LICENSE_JSON }}
+        run: |
+          if [ -n "$FIRELY_LICENSE_JSON" ] && [ -n "$OPENFHIR_LICENSE_JSON" ]; then
+            echo "available=true" >> "$GITHUB_OUTPUT"
+          elif [ "${{ github.event_name }}" = "pull_request" ]; then
+            echo "::notice::License secrets are unavailable (fork PR, or FIRELY_LICENSE_JSON / OPENFHIR_LICENSE_JSON not configured) — skipping E2E."
+            echo "available=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::Repository secrets FIRELY_LICENSE_JSON and OPENFHIR_LICENSE_JSON must be set for the release gate — add them under Settings → Secrets and variables → Actions"
+            exit 1
+          fi
+
+      - name: Checkout
+        if: steps.secrets-check.outputs.available == 'true'
+        uses: actions/checkout@v4
+
+      - name: Setup .NET
+        if: steps.secrets-check.outputs.available == 'true'
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Setup Node
+        if: steps.secrets-check.outputs.available == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install newman
+        if: steps.secrets-check.outputs.available == 'true'
+        run: npm install -g newman
+
+      - name: Write license files from secrets
+        if: steps.secrets-check.outputs.available == 'true'
+        env:
+          FIRELY_LICENSE_JSON: ${{ secrets.FIRELY_LICENSE_JSON }}
+          OPENFHIR_LICENSE_JSON: ${{ secrets.OPENFHIR_LICENSE_JSON }}
+        run: |
+          mkdir -p tests/licenses
+          printf '%s' "$FIRELY_LICENSE_JSON" > tests/licenses/firely-license.json
+          printf '%s' "$OPENFHIR_LICENSE_JSON" > tests/licenses/openfhir-license.json
+
+      - name: Determine Firely image tag (cache key)
+        if: steps.secrets-check.outputs.available == 'true'
+        id: firely
+        run: |
+          TAG=$(grep -oPm1 'image:\s*firely/server:\K\S+' tests/docker-compose.yml)
+          echo "tag=${TAG:-unknown}" >> "$GITHUB_OUTPUT"
+
+      # Firely's first boot imports the FHIR spec zips into tests/vonk-imported
+      # (~20-30 min). Caching that directory per image tag makes warm runs
+      # start in a couple of minutes. Restore/save are split so a failed run
+      # never saves a partially imported directory under the immutable key
+      # (the combined actions/cache saves even when the job fails). The -v2
+      # suffix evicts a partial cache saved by an early failed run.
+      - name: Restore Firely spec import cache
+        if: steps.secrets-check.outputs.available == 'true'
+        id: vonk-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: tests/vonk-imported
+          key: vonk-imported-firely-${{ steps.firely.outputs.tag }}-v2
+
+      # The Firely container runs as a non-root 'firely' user and must be able
+      # to write into the bind-mounted vonk-imported dir. Without this, Docker
+      # creates the missing dir as root:755 (and a cache hit restores it owned
+      # by 'runner'), Firely crashes on .vonk-import-history.json, and the
+      # readiness gate polls a dead container until it times out.
+      - name: Make vonk-imported writable by the Firely container
+        if: steps.secrets-check.outputs.available == 'true'
+        run: |
+          mkdir -p tests/vonk-imported
+          sudo chmod -R a+rwX tests/vonk-imported
+
+      # Explicit pull so a re-pushed tag can never leave us on a stale image.
+      - name: Pull compose images
+        if: steps.secrets-check.outputs.available == 'true'
+        run: docker compose -f tests/docker-compose.yml pull
+
+      - name: Run E2E suite
+        if: steps.secrets-check.outputs.available == 'true'
+        env:
+          TERM: xterm
+        run: ./tests/test.sh
+
+      # The Firely container writes tests/vonk-imported as root; make it
+      # readable by the runner user so the cache post-step can save it.
+      - name: Fix vonk-imported ownership for cache save
+        if: always() && steps.secrets-check.outputs.available == 'true'
+        run: sudo chown -R "$USER":"$USER" tests/vonk-imported 2>/dev/null || true
+
+      - name: Save Firely spec import cache
+        if: success() && steps.secrets-check.outputs.available == 'true' && steps.vonk-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: tests/vonk-imported
+          key: vonk-imported-firely-${{ steps.firely.outputs.tag }}-v2
+
+      - name: Upload test report and logs
+        if: always() && steps.secrets-check.outputs.available == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-results
+          path: |
+            tests/newman-report.xml
+            tests/docker-logs.txt
+          if-no-files-found: ignore
+
+      # If test.sh died before its own teardown ran (e.g. step timeout or a
+      # kill that skipped the trap), the containers are still up — dump their
+      # logs here. When the trap did run, test.sh has already printed logs.
+      - name: Dump container logs on failure
+        if: failure() && steps.secrets-check.outputs.available == 'true'
+        run: |
+          for svc in firely openfhir mongodb ehrbase ehrbase-postgres; do
+            echo "::group::docker compose logs: $svc"
+            docker compose -f tests/docker-compose.yml logs --no-color --tail=400 "$svc" 2>&1 || true
+            echo "::endgroup::"
+          done

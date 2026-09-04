@@ -14,17 +14,18 @@ consumer -> facade : FHIR Search Query\n(e.g. GET /fhir/AllergyIntolerance?patie
 
 facade -> firely : PIX lookup — read Patient,\nfind EHR ID for target CDR
 
-facade -> openfhir : /toaql (templateId, ehrId, fhirPath)
+facade -> openfhir : /openfhir/toaql (templateId, ehrId, fhirPath)
 
 openfhir --> facade : AQL(s)
 
 facade -> cdr : execute AQL
 cdr --> facade : archetype rows
 
-facade -> openfhir : REST /tofhir (archetype rows)
+facade -> openfhir : POST /$tofhir\n(Parameters: composition = archetype rows,\ntemplateId, context: ehr_id + patient)
 
+openfhir --> facade : FHIR Bundle\n(+ engine Provenance,\nOperationOutcome on partial failure)
 
-openfhir --> facade : FHIR Bundle
+facade -> facade : strip engine Provenance\nand OperationOutcome entries
 
 facade --> consumer : FHIR searchset Bundle\n(filtered to requested resource type)
 

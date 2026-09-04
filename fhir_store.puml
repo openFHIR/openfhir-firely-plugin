@@ -20,10 +20,12 @@ alt EHR ID not found
     facade -> firely : update Patient with new ehrId identifier
 end
 
-facade -> openfhir : REST /toopenehr (FHIR resource)
+facade -> openfhir : POST /$toopenehr?format=canonical\n(FHIR resource as body)
 
-openfhir --> facade : openEHR Composition
+openfhir --> facade : Parameters\n(composition valueString\n+ optional outcome warnings)
 
-facade -> cdr : POST /ehr/{{ehrId}}/composition
+facade -> facade : unwrap composition,\nlog outcome warnings
+
+facade -> cdr : POST /ehr/{ehrId}/composition
 
 @enduml

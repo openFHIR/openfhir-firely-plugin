@@ -2,12 +2,17 @@
 set -e
 
 # ── Colours ──────────────────────────────────────────────────────────────────
-RESET=$(tput sgr0)
-BOLD=$(tput bold)
-GREEN=$(tput setaf 2)
-CYAN=$(tput setaf 6)
-YELLOW=$(tput setaf 3)
-RED=$(tput setaf 1)
+# tput fails on non-TTY/dumb terminals (e.g. CI runners) and would trip set -e.
+if [ -t 1 ] && command -v tput >/dev/null && [ "${TERM:-dumb}" != "dumb" ]; then
+    RESET=$(tput sgr0)
+    BOLD=$(tput bold)
+    GREEN=$(tput setaf 2)
+    CYAN=$(tput setaf 6)
+    YELLOW=$(tput setaf 3)
+    RED=$(tput setaf 1)
+else
+    RESET=""; BOLD=""; GREEN=""; CYAN=""; YELLOW=""; RED=""
+fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -23,9 +28,14 @@ wait_for_http() {
     local url=$1
     local label=${2:-"$url"}
     local timeout=${3:-120}
+    local container=${4:-}
     log "Waiting for $label to be ready..."
     local elapsed=0
     until curl -sf "$url" > /dev/null 2>&1; do
+        # Don't poll a dead container for the rest of the timeout.
+        if [ -n "$container" ] && [ "$(docker inspect -f '{{.State.Running}}' "$container" 2>/dev/null)" != "true" ]; then
+            fail "Container '$container' exited while waiting for $label — check its logs"
+        fi
         sleep 2
         elapsed=$((elapsed + 2))
         if [ $elapsed -ge $timeout ]; then
@@ -69,8 +79,21 @@ wait_for_log() {
 }
 
 cleanup() {
-    log "Tearing down containers..."
+    local status=$?
     cd "$SCRIPT_DIR"
+    # On CI, capture container logs before teardown removes them: full logs
+    # to docker-logs.txt (uploaded as a workflow artifact), a bounded tail
+    # per service to the workflow log.
+    if [ "$status" -ne 0 ] && [ "${GITHUB_ACTIONS:-}" = "true" ]; then
+        warn "Run failed (exit $status) — dumping container logs before teardown"
+        docker compose logs --no-color > "$SCRIPT_DIR/docker-logs.txt" 2>&1 || true
+        for svc in firely openfhir mongodb ehrbase ehrbase-postgres; do
+            echo "::group::docker compose logs: $svc (last 400 lines)"
+            docker compose logs --no-color --tail=400 "$svc" 2>&1 || true
+            echo "::endgroup::"
+        done
+    fi
+    log "Tearing down containers..."
     docker compose down 2>/dev/null || true
 }
 
@@ -110,16 +133,17 @@ trap cleanup EXIT
 wait_for_log  "mongodb-test"       "Waiting for connections"          60
 wait_for_log  "ehrbase-postgres-test" "database system is ready"      60
 wait_for_http "http://localhost:8081/ehrbase/rest/openehr/v1/definition/template/adl1.4" \
-              "EHRbase"            180
+              "EHRbase"            180  ehrbase-test
 wait_for_http "http://localhost:8080/health" \
-              "openFHIR"          180
+              "openFHIR"          180  openfhir-test
 wait_for_http "http://localhost:4080/metadata" \
-              "Firely" 1800
+              "Firely" 1800 firely-test
 
 # ── Step 4: Run Newman ────────────────────────────────────────────────────────
 log "Running Postman collection with Newman..."
 newman run "$COLLECTION" \
-    --reporters cli \
+    --reporters cli,junit \
+    --reporter-junit-export "$SCRIPT_DIR/newman-report.xml" \
     --bail
 
 ok "All Newman tests passed!"

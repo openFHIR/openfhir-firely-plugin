@@ -120,7 +120,7 @@ public class IpsSummaryService
             _logger.LogInformation("Sending {Count} archetype rows to toFhir for patient {PatientId}",
                 allRows.Count, patientId);
 
-            var fhirJson = await _openFhirClient.ToFhir(allRows, reqId, _ipsTemplateId);
+            var fhirJson = await _openFhirClient.ToFhir(allRows, reqId, _ipsTemplateId, ehrId, $"Patient/{patientId}");
             _logger.LogInformation("toFhir raw response for patient {PatientId}: {FhirJson}", patientId, fhirJson);
 
             var resultBundle = FhirVersionHelper.GetDeserializer(FhirVersionHelper.FhirR4).DeserializeResource(fhirJson) as Bundle;

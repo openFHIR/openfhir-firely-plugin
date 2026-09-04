@@ -3,3 +3,7 @@ licenses/
 
 # Firely runtime import dir — populated at runtime
 vonk-imported/
+
+# Test-run output
+newman-report.xml
+docker-logs.txt

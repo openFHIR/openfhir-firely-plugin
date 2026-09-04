@@ -16,6 +16,11 @@ Compositions and vice versa using configurable template-based mappings.
 
 > See https://github.com/openFHIR/openfhir-hapi-interceptor if you're looking for a HAPI Interceptor.
 
+> **openFHIR version compatibility:** Version 2.0.0+ of this plugin only works with **openFHIR >= 3.0.0**
+> (it uses the `$tofhir` / `$toopenehr` FHIR operations introduced in openFHIR 3.0.0). If you need a plugin
+> that works with openFHIR < 3.0.0, use an older release of this plugin (the `1.x` tags), which talks to the
+> legacy `/openfhir/tofhir` and `/openfhir/toopenehr` endpoints.
+
 ## How it works
 
 ### Storing FHIR data in openEHR
@@ -55,6 +60,7 @@ into a standard Firely Server deployment — no modifications to Firely itself a
 
 - .NET 8
 - Firely Server 6.5+ (with a license allowing you to run custom plugins)
+- openFHIR >= 3.0.0
 
 ### Running a whole stack with Docker Compose
 
@@ -75,6 +81,13 @@ docker compose up
 ```
 
 > You either need to include an openFHIR container in the docker-compose or configure your sandbox access.
+
+### Running tests
+
+```bash
+dotnet test          # unit tests (OpenFhirClient request/response handling, entry stripping)
+tests/test.sh        # full E2E: Firely + openFHIR + EHRbase stack + Postman collection via newman
+```
 
 ---
 
@@ -146,6 +159,9 @@ against the `id` field.
 
 ### openFHIR service (`OpenFhir.BaseUrl`)
 
+The configured openFHIR instance must be **version 3.0.0 or newer** — the plugin calls the
+`POST /$tofhir` and `POST /$toopenehr` FHIR operations (plus the legacy `/openfhir/toaql`).
+
 ```json
 {
   "OpenFhirPlugin": {
@@ -202,7 +218,10 @@ POST /fhir
            │           filters to references of type Patient, returns first non-blank ID part
            ├─ look up EHR ID via PIX manager (local patient Firely store)
            │     └─ if not found → provision new EHR on CDR
-           ├─ convert resource to openEHR format via openFHIR
+           ├─ convert resource to openEHR format via openFHIR POST /$toopenehr?format=canonical
+           │     (FHIR Bundle sent directly as the body; the composition JSON comes back in
+           │      Parameters.parameter[name=composition].valueString; engine warnings in the
+           │      optional outcome parameter are logged)
            ├─ store on CDR
            └─ return HTTP 201 + Location header  (Firely never sees the request)
 ```
@@ -262,9 +281,13 @@ GET /fhir/AllergyIntolerance?patient=123
            ├─ resolve EHR ID via PIX manager (local patient Firely store)
            │     └─ if not found → error (no provisioning for query path)
            ├─ build fhirPath (/ResourceType?remaining-params, patient excluded)
-           ├─ call openFHIR /toaql
+           ├─ call openFHIR /openfhir/toaql
            ├─ execute returned AQLs against CDR
-           ├─ call openFHIR /tofhir with AQL result rows
+           ├─ call openFHIR POST /$tofhir with AQL result rows
+           │     (Parameters body: composition = stringified rows, templateId, context with
+           │      ehr_id + patient reference; engine-marked Provenance and OperationOutcome
+           │      entries are stripped from the returned Bundle — Provenance produced by a
+           │      mapping itself is kept)
            ├─ filter result bundle to requested resource type
            ├─ set Patient/{id} reference on each returned resource
            └─ return HTTP 200 searchset Bundle  (Firely never sees the request)
@@ -332,10 +355,12 @@ GET /fhir/Patient/123/$summary
     ├─ resolve EHR ID via PIX manager
     │
     └─ for each IPS section (AllergyIntolerance, Condition, MedicationStatement, ...)
-          ├─ call openFHIR /toaql with Ips.TemplateId
+          ├─ call openFHIR /openfhir/toaql with Ips.TemplateId
           └─ execute returned AQLs against CDR → collect rows
     │
-    ├─ call openFHIR /tofhir with all collected rows + Ips.TemplateId
+    ├─ call openFHIR POST /$tofhir with all collected rows + Ips.TemplateId
+    │     (context carries ehr_id + patient reference; engine-marked Provenance and
+    │      OperationOutcome entries are stripped from the returned Bundle)
     ├─ inject Patient resource and update subject references
     └─ return HTTP 200 IPS document Bundle
 ```

@@ -1,0 +1,123 @@
+# Release workflow
+#
+# How to cut a release:
+#   1. Bump <Version> in src/OpenFhirFirelyPlugin/OpenFhirFirelyPlugin.csproj
+#   2. Add a matching "## [x.y.z] - YYYY-MM-DD" section to CHANGELOG.md
+#   3. Merge to main, then run this workflow from the Actions tab (workflow_dispatch)
+#
+# The workflow first runs the full E2E suite (e2e.yml, tests/test.sh) as a
+# gate, then builds and tests the plugin, packages the publish output as a zip,
+# creates the git tag (plain "x.y.z", matching the existing tag convention) and a
+# GitHub release whose notes combine the CHANGELOG section with the Firely Server
+# compatibility derived from the Vonk SDK version referenced in the csproj.
+name: Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PROJECT: src/OpenFhirFirelyPlugin/OpenFhirFirelyPlugin.csproj
+
+jobs:
+  # Full E2E suite (tests/test.sh via e2e.yml) must pass before the release
+  # tag — the irreversible step — is created.
+  e2e:
+    uses: ./.github/workflows/e2e.yml
+    secrets: inherit
+
+  release:
+    needs: e2e
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine version
+        id: version
+        run: |
+          VERSION=$(grep -oPm1 '(?<=<Version>)[^<]+' "$PROJECT")
+          if [ -z "$VERSION" ]; then
+            echo "::error::Could not read <Version> from $PROJECT"
+            exit 1
+          fi
+          echo "Version from csproj: $VERSION"
+          if git rev-parse -q --verify "refs/tags/$VERSION" >/dev/null; then
+            echo "::error::Tag $VERSION already exists — bump <Version> in $PROJECT first"
+            exit 1
+          fi
+          VONK_VERSION=$(grep -oPm1 'Include="Vonk\.Core"\s+Version="\K[^"]+' "$PROJECT")
+          FIRELY_VERSION="${VONK_VERSION%%-*}"
+          echo "version=$VERSION"             >> "$GITHUB_OUTPUT"
+          echo "vonk_version=$VONK_VERSION"   >> "$GITHUB_OUTPUT"
+          echo "firely_version=$FIRELY_VERSION" >> "$GITHUB_OUTPUT"
+
+      - name: Extract release notes from CHANGELOG.md
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+          FIRELY_VERSION: ${{ steps.version.outputs.firely_version }}
+          VONK_VERSION: ${{ steps.version.outputs.vonk_version }}
+        run: |
+          SECTION=$(awk -v ver="$VERSION" '
+            $0 ~ "^## \\[" ver "\\]" {flag=1; next}
+            /^## \[/ {flag=0}
+            flag' CHANGELOG.md)
+          if [ -z "$(echo "$SECTION" | tr -d '[:space:]')" ]; then
+            echo "::error::CHANGELOG.md has no '## [$VERSION]' section — add one before releasing"
+            exit 1
+          fi
+          {
+            echo "Firely Server plugin that routes clinical data between FHIR clients and an openEHR CDR via openFHIR."
+            echo
+            echo "**Compatibility:** Firely Server ${FIRELY_VERSION} or later (built against Vonk SDK \`${VONK_VERSION}\`) · .NET 8 · FHIR STU3 / R4 / R5"
+            echo
+            echo "## Changes"
+            echo "$SECTION"
+            echo
+            echo "## Installation"
+            echo
+            echo "Extract \`openfhir-firely-plugin-${VERSION}.zip\` into your Firely Server \`plugins\` directory and register the plugin in \`appsettings.json\` — see the [README](https://github.com/${GITHUB_REPOSITORY}/blob/${VERSION}/README.md) for details."
+          } > release-notes.md
+          echo "--- release notes ---"
+          cat release-notes.md
+
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore
+        run: dotnet restore OpenFhirFirelyPlugin.sln
+
+      - name: Build
+        run: dotnet build OpenFhirFirelyPlugin.sln --configuration Release --no-restore
+
+      - name: Unit tests
+        run: dotnet test OpenFhirFirelyPlugin.sln --configuration Release --no-build --verbosity normal
+
+      - name: Package plugin
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          dotnet publish "$PROJECT" --configuration Release --no-build --output out/openfhir-firely-plugin
+          if [ ! -f out/openfhir-firely-plugin/OpenFhirFirelyPlugin.dll ]; then
+            echo "::error::Publish output is missing OpenFhirFirelyPlugin.dll"
+            exit 1
+          fi
+          (cd out/openfhir-firely-plugin && zip -r "../openfhir-firely-plugin-${VERSION}.zip" .)
+          ls -la out/
+
+      - name: Create tag and GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          gh release create "$VERSION" \
+            --target "$GITHUB_SHA" \
+            --title "openFHIR Firely Plugin $VERSION" \
+            --notes-file release-notes.md \
+            "out/openfhir-firely-plugin-${VERSION}.zip"

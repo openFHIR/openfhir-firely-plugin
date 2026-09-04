@@ -1877,6 +1877,136 @@
 			]
 		},
 		{
+			"name": "openFHIR 3.0.0 Operations (direct smoke)",
+			"item": [
+				{
+					"name": "Smoke: POST $toopenehr (direct)",
+					"event": [
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+									"const json = pm.response.json();",
+									"pm.test(\"Response is Parameters\", function () { pm.expect(json.resourceType).to.eql('Parameters'); });",
+									"const compParam = (json.parameter || []).find(p => p.name === 'composition');",
+									"pm.test(\"composition parameter with non-empty valueString present\", function () {",
+									"    pm.expect(compParam, 'parameter[name=composition]').to.not.be.undefined;",
+									"    pm.expect(compParam.valueString).to.be.a('string').and.to.not.be.empty;",
+									"});",
+									"// hand the composition's ContentItem array to the $tofhir smoke request",
+									"const composition = JSON.parse(compParam.valueString);",
+									"pm.collectionVariables.set('smoke_content_items', JSON.stringify(composition.content || []));"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/fhir+json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{\n  \"resourceType\": \"Bundle\",\n  \"type\": \"transaction\",\n  \"entry\": [\n    {\n      \"resource\": {\n        \"resourceType\": \"AllergyIntolerance\",\n        \"meta\": {\n          \"profile\": [\n            \"http://nictiz.nl/fhir/StructureDefinition/zib-AllergyIntolerance\"\n          ]\n        },\n        \"clinicalStatus\": {\n          \"coding\": [\n            {\n              \"system\": \"http://terminology.hl7.org/CodeSystem/allergyintolerance-clinical\",\n              \"code\": \"active\"\n            }\n          ]\n        },\n        \"verificationStatus\": {\n          \"coding\": [\n            {\n              \"system\": \"http://terminology.hl7.org/CodeSystem/allergyintolerance-verification\",\n              \"code\": \"confirmed\"\n            }\n          ]\n        },\n        \"category\": [\n          \"biologic\"\n        ],\n        \"criticality\": \"high\",\n        \"code\": {\n          \"coding\": [\n            {\n              \"system\": \"http://snomed.info/sct\",\n              \"code\": \"288328004\",\n              \"display\": \"Bee venom\"\n            }\n          ]\n        },\n        \"patient\": {\n          \"reference\": \"Patient/{{px_r4_id}}\"\n        },\n        \"onsetDateTime\": \"2008-11-08\",\n        \"lastOccurrence\": \"2009-11-15\",\n        \"reaction\": [\n          {\n            \"manifestation\": [\n              {\n                \"coding\": [\n                  {\n                    \"system\": \"http://snomed.info/sct\",\n                    \"code\": \"16932000\",\n                    \"display\": \"Nausea and vomiting\"\n                  }\n                ]\n              }\n            ],\n            \"severity\": \"severe\"\n          }\n        ]\n      }\n    }\n  ]\n}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{openfhir}}/$toopenehr?format=canonical&templateId=DataHub-AllergyIntolerance-2017",
+							"host": [
+								"{{openfhir}}"
+							],
+							"path": [
+								"$toopenehr"
+							],
+							"query": [
+								{
+									"key": "format",
+									"value": "canonical"
+								},
+								{
+									"key": "templateId",
+									"value": "DataHub-AllergyIntolerance-2017"
+								}
+							]
+						}
+					},
+					"response": []
+				},
+				{
+					"name": "Smoke: POST $tofhir (direct)",
+					"event": [
+						{
+							"listen": "prerequest",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"// Parameters body: composition = stringified ContentItem array from the $toopenehr smoke test",
+									"const contentItems = pm.collectionVariables.get('smoke_content_items') || '[]';",
+									"const body = {",
+									"    resourceType: 'Parameters',",
+									"    parameter: [",
+									"        { name: 'composition', valueString: contentItems },",
+									"        { name: 'templateId', valueString: 'DataHub-AllergyIntolerance-2017' }",
+									"    ]",
+									"};",
+									"pm.collectionVariables.set('smoke_tofhir_body', JSON.stringify(body));"
+								]
+							}
+						},
+						{
+							"listen": "test",
+							"script": {
+								"type": "text/javascript",
+								"exec": [
+									"pm.test(\"Status 200\", function () { pm.response.to.have.status(200); });",
+									"pm.test(\"Response is a Bundle\", function () { pm.expect(pm.response.json().resourceType).to.eql('Bundle'); });"
+								]
+							}
+						}
+					],
+					"request": {
+						"method": "POST",
+						"header": [
+							{
+								"key": "Content-Type",
+								"value": "application/fhir+json",
+								"type": "text"
+							}
+						],
+						"body": {
+							"mode": "raw",
+							"raw": "{{smoke_tofhir_body}}",
+							"options": {
+								"raw": {
+									"language": "json"
+								}
+							}
+						},
+						"url": {
+							"raw": "{{openfhir}}/$tofhir",
+							"host": [
+								"{{openfhir}}"
+							],
+							"path": [
+								"$tofhir"
+							]
+						}
+					},
+					"response": []
+				}
+			]
+		},
+		{
 			"name": "FHIR Query ← openEHR",
 			"item": [
 				{
