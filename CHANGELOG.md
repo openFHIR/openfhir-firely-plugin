@@ -13,6 +13,10 @@ the referenced Vonk SDK version.
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-09-04
+
+- **Firely Server:** 6.5 or later (Vonk SDK `6.5-*`)
+
 Requires **openFHIR 3.0.0 or later** — the plugin now talks to openFHIR through its FHIR-native
 operations instead of the legacy REST endpoints.
 
