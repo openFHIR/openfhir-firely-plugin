@@ -6,12 +6,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 Release notes are generated from this file by the [release workflow](.github/workflows/release.yml):
-the section matching the `<Version>` in `OpenFhirFirelyPlugin.csproj` becomes the body of the GitHub
-release, together with the Firely Server compatibility derived from the referenced Vonk SDK version.
+keep the `## [Unreleased]` section up to date as changes merge. When a release is cut (the version
+is entered when dispatching the workflow), the Unreleased section is promoted to that version and
+becomes the body of the GitHub release, together with the Firely Server compatibility derived from
+the referenced Vonk SDK version.
 
 ## [Unreleased]
-
-## [2.0.0] - 2026-09-04
 
 Requires **openFHIR 3.0.0 or later** — the plugin now talks to openFHIR through its FHIR-native
 operations instead of the legacy REST endpoints.
